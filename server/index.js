@@ -366,7 +366,7 @@ const server = createServer(async (request, response) => {
   sendJson(response, 405, { error: 'Методот не е дозволен.' })
 })
 
-server.listen(port, () => {
+server.listen(port, '0.0.0.0', () => {
   console.log(`Carepoint API is running at http://localhost:${port}`)
   console.log(`SQLite database: ${databasePath}`)
 })
