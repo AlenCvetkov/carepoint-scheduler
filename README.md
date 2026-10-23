@@ -69,14 +69,8 @@ the SQLite file if bookings need to survive deployments/restarts.
 
 ## AI tools
 
-OpenAI Codex was used as a coding assistant for implementation and review. Before submission,
-the candidate should review each part of the code and be ready to explain the data model,
-API routes, and booking constraints.
+OpenAI Codex assisted me with implementation and code review. I defined the app's requirements and
+visual direction, made decisions about the booking flow and deployment, and worked through the code
+with Codex for the data model, API routes, and booking rules.
 
-## What I would improve with more time
-
-- Add host authentication and management controls
-- Send a confirmation email after a booking
-- Add a hosted PostgreSQL database and automated deployment
-- Add automated API and UI tests
 
