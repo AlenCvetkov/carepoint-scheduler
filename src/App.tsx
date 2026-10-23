@@ -23,6 +23,11 @@ function formatDate(date: string) {
     }).format(new Date(`${date}T12:00:00`))
 }
 
+function hasNotPassed(slot: TimeSlot, currentTime: number) {
+    const slotTime = new Date(`${slot.date}T${slot.startTime}:00`).getTime()
+    return Number.isFinite(slotTime) && slotTime > currentTime
+}
+
 function App() {
     const [slots, setSlots] = useState<TimeSlot[]>([])
     const [doctors, setDoctors] = useState<Doctor[]>([])
@@ -42,6 +47,12 @@ function App() {
     const [notice, setNotice] = useState<Notice | null>(null)
     const [isLoading, setIsLoading] = useState(true)
     const [isSaving, setIsSaving] = useState(false)
+    const [currentTime, setCurrentTime] = useState(() => Date.now())
+
+    useEffect(() => {
+        const intervalId = window.setInterval(() => setCurrentTime(Date.now()), 30_000)
+        return () => window.clearInterval(intervalId)
+    }, [])
 
     async function loadSlots() {
         try {
@@ -106,15 +117,16 @@ function App() {
         (doctor) => doctor.speciality === scheduleSpeciality,
     )
 
-    const visibleSlots = slots.filter((slot) => {
+    const activeSlots = slots.filter((slot) => hasNotPassed(slot, currentTime))
+    const visibleSlots = activeSlots.filter((slot) => {
         const doctor = doctors.find((item) => item.id === slot.doctorId)
         const matchesDate = !selectedDate || slot.date === selectedDate
         const matchesSpeciality = !scheduleSpeciality || doctor?.speciality === scheduleSpeciality
         const matchesDoctor = !scheduleDoctorId || String(slot.doctorId) === scheduleDoctorId
         return matchesDate && matchesSpeciality && matchesDoctor
     })
-    const availableCount = slots.filter((slot) => !slot.isBooked).length
-    const bookedCount = slots.length - availableCount
+    const availableCount = activeSlots.filter((slot) => !slot.isBooked).length
+    const bookedCount = activeSlots.length - availableCount
 
     async function handlePublish(event: FormEvent<HTMLFormElement>) {
         event.preventDefault()
