@@ -4,7 +4,6 @@ import { readFile, stat } from 'node:fs/promises'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { DatabaseSync } from 'node:sqlite'
-
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const dataDirectory = path.join(projectRoot, 'data')
 const databasePath = path.join(dataDirectory, 'carepoint.sqlite')
@@ -86,6 +85,23 @@ database.exec(`
     ) THEN RAISE(ABORT, 'overlapping_slot') END;
   END;
 `)
+database.exec([
+  "DROP TRIGGER IF EXISTS prevent_overlapping_slot_updates;",
+  "CREATE TRIGGER prevent_overlapping_slot_updates",
+  "BEFORE UPDATE OF date, start_time, duration_minutes, doctor_id ON time_slots",
+  "BEGIN",
+  "  SELECT CASE WHEN EXISTS (",
+  "    SELECT 1 FROM time_slots existing",
+  "    WHERE existing.id <> OLD.id",
+  "      AND existing.date = NEW.date",
+  "      AND existing.doctor_id IS NEW.doctor_id",
+  "      AND CAST(substr(existing.start_time, 1, 2) AS INTEGER) * 60 + CAST(substr(existing.start_time, 4, 2) AS INTEGER)",
+  "          < CAST(substr(NEW.start_time, 1, 2) AS INTEGER) * 60 + CAST(substr(NEW.start_time, 4, 2) AS INTEGER) + NEW.duration_minutes",
+  "      AND CAST(substr(existing.start_time, 1, 2) AS INTEGER) * 60 + CAST(substr(existing.start_time, 4, 2) AS INTEGER) + existing.duration_minutes",
+  "          > CAST(substr(NEW.start_time, 1, 2) AS INTEGER) * 60 + CAST(substr(NEW.start_time, 4, 2) AS INTEGER)",
+  "  ) THEN RAISE(ABORT, 'overlapping_slot') END;",
+  "END;",
+].join('\n'))
 const bookingColumns = database.prepare('PRAGMA table_info(bookings)').all()
 if (!bookingColumns.some((column) => column.name === 'description')) {
   database.exec("ALTER TABLE bookings ADD COLUMN description TEXT NOT NULL DEFAULT ''")
@@ -158,6 +174,35 @@ function minutesOf(time) {
   const [hours, minutes] = time.split(':').map(Number)
   return hours * 60 + minutes
 }
+
+function validateSlotInput(body) {
+  const { date, startTime } = body
+  const durationMinutes = Number(body.durationMinutes)
+  const doctorId = Number(body.doctorId)
+
+  if (!isRealDate(date) || typeof startTime !== 'string' || !/^([01]\d|2[0-3]):[0-5]\d$/.test(startTime)) {
+    return { error: 'Изберете исправен датум и време.' }
+  }
+  if (!Number.isInteger(doctorId)
+    || !database.prepare('SELECT 1 FROM doctors WHERE id = ?').get(doctorId)) {
+    return { error: 'Изберете валиден доктор.' }
+  }
+  if (!allowedDurations.has(durationMinutes)) {
+    return { error: 'Изберете дозволено времетраење.' }
+  }
+
+  const startMinutes = minutesOf(startTime)
+  if (startMinutes < 8 * 60 || startMinutes >= 15 * 60
+    || startMinutes + durationMinutes > 15 * 60) {
+    return { error: 'Термините мора да бидат во периодот од 08:00 до 15:00.' }
+  }
+  if (!isValidStart(date, startTime)) {
+    return { error: 'Не може да објавите термин во минатото.' }
+  }
+
+  return { values: { date, startTime, durationMinutes, doctorId } }
+}
+
 
 async function serveFrontend(request, response, pathname) {
   const distRoot = path.join(projectRoot, 'dist')
@@ -245,40 +290,21 @@ const server = createServer(async (request, response) => {
       sendJson(response, 400, { error: error.message })
       return
     }
-    const { date, startTime, durationMinutes } = body
-    const doctorId = Number(body.doctorId)
-    if (!isRealDate(date) || typeof startTime !== 'string' || !/^([01]\d|2[0-3]):[0-5]\d$/.test(startTime)) {
-      sendJson(response, 400, { error: 'Изберете исправен датум и време.' })
+
+    const validation = validateSlotInput(body)
+    if (validation.error) {
+      sendJson(response, 400, { error: validation.error })
       return
     }
-    const doctorExists = Number.isInteger(doctorId)
-      && database.prepare('SELECT 1 FROM doctors WHERE id = ?').get(doctorId)
-    if (!doctorExists) {
-      sendJson(response, 400, { error: 'Изберете валиден доктор.' })
-      return
-    }
-    if (!allowedDurations.has(Number(durationMinutes))) {
-      sendJson(response, 400, { error: 'Изберете дозволено времетраење.' })
-      return
-    }
-    const startMinutes = minutesOf(startTime)
-    if (startMinutes < 8 * 60 || startMinutes >= 15 * 60
-      || startMinutes + Number(durationMinutes) > 15 * 60) {
-      sendJson(response, 400, { error: 'Термините мора да бидат во периодот од 08:00 до 15:00.' })
-      return
-    }
-    if (!isValidStart(date, startTime)) {
-      sendJson(response, 400, { error: 'Не може да објавите термин во минатото.' })
-      return
-    }
+    const { date, startTime, durationMinutes, doctorId } = validation.values
+
     try {
-      const result = database.prepare(`
-        INSERT INTO time_slots (date, start_time, duration_minutes, doctor_id)
-        VALUES (?, ?, ?, ?)
-      `).run(date, startTime, Number(durationMinutes), doctorId)
+      const result = database.prepare(
+        'INSERT INTO time_slots (date, start_time, duration_minutes, doctor_id) VALUES (?, ?, ?, ?)',
+      ).run(date, startTime, durationMinutes, doctorId)
       sendJson(response, 201, {
         id: Number(result.lastInsertRowid), doctorId, date, startTime,
-        durationMinutes: Number(durationMinutes), isBooked: false,
+        durationMinutes, isBooked: false,
       })
     } catch (error) {
       const isOverlap = String(error.message).includes('overlapping_slot')
@@ -288,6 +314,84 @@ const server = createServer(async (request, response) => {
           : 'Терминот не може да се објави.',
       })
     }
+    return
+  }
+
+  const slotResourceMatch = pathname.match(/^\/api\/slots\/(\d+)$/)
+
+  if (slotResourceMatch && request.method === 'PATCH') {
+    const slotId = Number(slotResourceMatch[1])
+    if (!Number.isInteger(slotId) || slotId < 1) {
+      sendJson(response, 400, { error: 'Изберете валиден термин.' })
+      return
+    }
+
+    let body
+    try {
+      body = await readJson(request)
+    } catch (error) {
+      sendJson(response, 400, { error: error.message })
+      return
+    }
+
+    const validation = validateSlotInput(body)
+    if (validation.error) {
+      sendJson(response, 400, { error: validation.error })
+      return
+    }
+
+    const slot = database.prepare(
+      'SELECT id, EXISTS(SELECT 1 FROM bookings WHERE bookings.slot_id = time_slots.id) AS isBooked FROM time_slots WHERE id = ?',
+    ).get(slotId)
+    if (!slot) {
+      sendJson(response, 404, { error: 'Терминот не е пронајден.' })
+      return
+    }
+    if (slot.isBooked) {
+      sendJson(response, 409, { error: 'Резервиран термин не може да се менува.' })
+      return
+    }
+
+    const { date, startTime, durationMinutes, doctorId } = validation.values
+    try {
+      database.prepare(
+        'UPDATE time_slots SET date = ?, start_time = ?, duration_minutes = ?, doctor_id = ? WHERE id = ?',
+      ).run(date, startTime, durationMinutes, doctorId, slotId)
+      sendJson(response, 200, {
+        id: slotId, doctorId, date, startTime, durationMinutes, isBooked: false,
+      })
+    } catch (error) {
+      const isOverlap = String(error.message).includes('overlapping_slot')
+      sendJson(response, 409, {
+        error: isOverlap
+          ? 'Овој термин се преклопува со друг термин кај истиот доктор.'
+          : 'Промените не може да се зачуваат.',
+      })
+    }
+    return
+  }
+
+  if (slotResourceMatch && request.method === 'DELETE') {
+    const slotId = Number(slotResourceMatch[1])
+    if (!Number.isInteger(slotId) || slotId < 1) {
+      sendJson(response, 400, { error: 'Изберете валиден термин.' })
+      return
+    }
+
+    const slot = database.prepare(
+      'SELECT id, EXISTS(SELECT 1 FROM bookings WHERE bookings.slot_id = time_slots.id) AS isBooked FROM time_slots WHERE id = ?',
+    ).get(slotId)
+    if (!slot) {
+      sendJson(response, 404, { error: 'Терминот не е пронајден.' })
+      return
+    }
+    if (slot.isBooked) {
+      sendJson(response, 409, { error: 'Резервиран термин не може да се избрише.' })
+      return
+    }
+
+    database.prepare('DELETE FROM time_slots WHERE id = ?').run(slotId)
+    sendJson(response, 200, { id: slotId, deleted: true })
     return
   }
 

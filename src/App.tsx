@@ -42,6 +42,8 @@ function App() {
     const [patientEmail, setPatientEmail] = useState('')
     const [description, setDescription] = useState('')
     const [slotDate, setSlotDate] = useState('')
+    const [editingSlotId, setEditingSlotId] = useState<number | null>(null)
+    const [deletingSlotId, setDeletingSlotId] = useState<number | null>(null)
     const [slotStartTime, setSlotStartTime] = useState('08:00')
     const [slotDuration, setSlotDuration] = useState(30)
     const [notice, setNotice] = useState<Notice | null>(null)
@@ -127,7 +129,63 @@ function App() {
     })
     const availableCount = activeSlots.filter((slot) => !slot.isBooked).length
     const bookedCount = activeSlots.length - availableCount
+    const managedSlots = activeSlots.filter((slot) => String(slot.doctorId) === publishDoctorId)
 
+    function startEditingSlot(slot: TimeSlot) {
+        if (slot.isBooked) {
+            setNotice({kind: 'error', message: 'Резервиран термин не може да се менува.'})
+            return
+        }
+        const doctor = doctors.find((item) => item.id === slot.doctorId)
+        if (!doctor) {
+            setNotice({kind: 'error', message: 'Не може да се најде докторот за овој термин.'})
+            return
+        }
+        setNotice(null)
+        setEditingSlotId(slot.id)
+        setPublishSpeciality(doctor.speciality)
+        setPublishDoctorId(String(doctor.id))
+        setSlotDate(slot.date)
+        setSlotStartTime(slot.startTime)
+        setSlotDuration(slot.durationMinutes)
+    }
+
+    function cancelSlotEdit() {
+        setEditingSlotId(null)
+        setSlotDate('')
+        setSlotStartTime('08:00')
+        setSlotDuration(30)
+    }
+
+    async function handleDeleteSlot(slot: TimeSlot) {
+        if (slot.isBooked) {
+            setNotice({kind: 'error', message: 'Резервиран термин не може да се избрише.'})
+            return
+        }
+        const confirmed = window.confirm(
+            'Дали сте сигурни дека сакате да го избришете терминот на '
+                + formatDate(slot.date) + ' во ' + slot.startTime + '?',
+        )
+        if (!confirmed) return
+
+        setDeletingSlotId(slot.id)
+        setNotice(null)
+        try {
+            const response = await fetch('/api/slots/' + slot.id, {method: 'DELETE'})
+            const result = await response.json()
+            if (!response.ok) throw new Error(result.error ?? 'Терминот не може да се избрише.')
+            if (editingSlotId === slot.id) cancelSlotEdit()
+            setNotice({kind: 'success', message: 'Терминот е избришан.'})
+            await loadSlots()
+        } catch (error) {
+            setNotice({
+                kind: 'error',
+                message: error instanceof Error ? error.message : 'Настана грешка.',
+            })
+        } finally {
+            setDeletingSlotId(null)
+        }
+    }
     async function handlePublish(event: FormEvent<HTMLFormElement>) {
         event.preventDefault()
         setIsSaving(true)
@@ -139,16 +197,24 @@ function App() {
             durationMinutes: slotDuration,
             doctorId: Number(publishDoctorId),
         }
+        const isEditing = editingSlotId !== null
 
         try {
-            const response = await fetch('/api/slots', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify(newSlot),
-            })
+            const response = await fetch(
+                isEditing ? '/api/slots/' + editingSlotId : '/api/slots',
+                {
+                    method: isEditing ? 'PATCH' : 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify(newSlot),
+                },
+            )
             const result = await response.json()
-            if (!response.ok) throw new Error(result.error ?? 'Терминот не може да се објави.')
-            setNotice({kind: 'success', message: 'Терминот е објавен.'})
+            if (!response.ok) throw new Error(result.error ?? 'Терминот не може да се зачува.')
+            setNotice({
+                kind: 'success',
+                message: isEditing ? 'Промените се зачувани.' : 'Терминот е објавен.',
+            })
+            setEditingSlotId(null)
             setSlotDate('')
             await loadSlots()
         } catch (error) {
@@ -334,7 +400,7 @@ function App() {
                     ) : (
                         <div className="publish-panel">
                             <div className="publish-copy"><span className="publish-icon">＋</span><p
-                                className="section-eyebrow">ЗА ДОКТОРСКИОТ ТИМ</p><h3>Објави слободен термин</h3>
+                                className="section-eyebrow">ЗА ДОКТОРСКИОТ ТИМ</p><h3>{editingSlotId !== null ? 'Измени објавен термин' : 'Објави слободен термин'}</h3>
                                 <p>Изберете датум, време и времетраење. Посетителите ќе можат да го резервираат
                                     терминот.</p>
                                 <div className="publish-hint"><span>ⓘ</span>Датумот се избира преку календарот. Може да
@@ -376,13 +442,66 @@ function App() {
                                     <option value={90}>90 мин.</option>
                                     <option value={120}>120 мин.</option>
                                 </select></label></div>
-                                <button className="publish-button" type="submit"
-                                        disabled={isSaving}>{isSaving ? 'Се објавува...' : 'Објави термин'}
-                                    <span>→</span></button>
-                                <p className="form-secure"><span>✓</span>Терминот ќе биде веднаш видлив во распоредот.
+                                <div className="publish-actions">
+                                    <button className="publish-button" type="submit"
+                                            disabled={isSaving}>{isSaving
+                                        ? (editingSlotId !== null ? 'Се зачувуваат промените...' : 'Се објавува...')
+                                        : (editingSlotId !== null ? 'Зачувај промени' : 'Објави термин')}
+                                        <span>→</span></button>
+                                    {editingSlotId !== null && <button className="cancel-edit-button" type="button"
+                                                                        onClick={cancelSlotEdit} disabled={isSaving}>
+                                        Откажи измена
+                                    </button>}
+                                </div>
+                                <p className="form-secure"><span>✓</span>
+                                    {editingSlotId !== null
+                                        ? 'Промените ќе се зачуваат во распоредот.'
+                                        : 'Терминот ќе биде веднаш видлив во распоредот.'}
                                 </p>
                             </form>
+                            <section className="slot-management" aria-labelledby="slot-management-title">
+                                <div className="slot-management-heading">
+                                    <div>
+                                        <h4 id="slot-management-title">Управување со објавени термини</h4>
+                                        <p>Избери доктор за да ги видиш неговите активни термини.</p>
+                                    </div>
+                                </div>
+                                {!publishDoctorId ? (
+                                    <p className="slot-management-empty">Прво избери специјалност и доктор.</p>
+                                ) : managedSlots.length === 0 ? (
+                                    <p className="slot-management-empty">Овој доктор нема активни објавени термини.</p>
+                                ) : (
+                                    <div className="slot-management-list">
+                                        {managedSlots.map((slot) => (
+                                            <article className="slot-management-item" key={slot.id}>
+                                                <div className="slot-management-info">
+                                                    <strong>{formatDate(slot.date)} · {slot.startTime}</strong>
+                                                    <span>Преглед · {slot.durationMinutes} мин.</span>
+                                                </div>
+                                                {slot.isBooked ? (
+                                                    <span className="slot-management-locked">
+                                                        Резервиран — не може да се менува или избрише
+                                                    </span>
+                                                ) : (
+                                                    <div className="slot-management-actions">
+                                                        <button type="button" onClick={() => startEditingSlot(slot)}
+                                                                disabled={isSaving || deletingSlotId !== null}>
+                                                            Измени
+                                                        </button>
+                                                        <button className="delete-slot-button" type="button"
+                                                                onClick={() => void handleDeleteSlot(slot)}
+                                                                disabled={isSaving || deletingSlotId !== null}>
+                                                            {deletingSlotId === slot.id ? 'Се брише...' : 'Избриши'}
+                                                        </button>
+                                                    </div>
+                                                )}
+                                            </article>
+                                        ))}
+                                    </div>
+                                )}
+                            </section>
                         </div>
+
                     )}
                 </div>
                 <div className="privacy-strip"><span className="privacy-icon">✓</span><span><strong>Вашата приватност е важна.</strong> Податоците за резервацијата се користат само за организација на прегледот.</span><span
